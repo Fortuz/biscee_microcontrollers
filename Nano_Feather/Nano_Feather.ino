@@ -1,56 +1,128 @@
 #include <Servo.h>
 
-Servo servo;
+// ------ SERVO SETUP ------
+Servo servo1, servo2, servo3;
+int pin_blue = 9;
+int pin_green = 10;
+int pin_orange = 11;
 
-class SecondOrderDynamics {
-  float xp, y, yd;
-  float k1, k2, k3;
+const int MIN_POS = 20;
+const int MAX_POS = 150;
 
-public:
-  SecondOrderDynamics(float f, float z, float r, float x0) {
-    float PI = 3.14159265359;
-    k1 = z / (PI * f);
-    k2 = 1.0 / ((2.0 * PI * f) * (2.0 * PI * f));
-    k3 = r * z / (2.0 * PI * f);
-    xp = x0;
-    y = x0;
-    yd = 0;
-  }
+// Position memory
+float currentPos[3] = {90, 90, 90};
+float startPos[3]   = {90, 90, 90};
+float targetPos[3]  = {90, 90, 90};
 
-  float update(float T, float x, float xd = NAN) {
-    if (isnan(xd)) {
-      xd = (x - xp) / T;  // estimate velocity if not given
-      xp = x;
-    }
-    float k2_stable = max(k2, 1.1f * (T * T / 4.0f + T * k1 / 2.0f));
-    y = y + T * yd;
-    yd = yd + T * ((x + k3 * xd - y - k1 * yd) / k2_stable);
-    return y;
-  }
-};
+// Timing for interpolation
+unsigned long moveStart = 0;
+unsigned long moveDuration = 1000;   // ms
 
-SecondOrderDynamics motion(1.0, 0.5, 1.0, 90.0); // frequency, damping, response, initial angle
+// Safety rate limit (deg/update)
+const float MAX_STEP = 2.0;
+const unsigned long UPDATE_INTERVAL = 20;
+unsigned long lastUpdate = 0;
 
-float targetAngle = 90.0;
-unsigned long lastTime;
+const byte START_BYTE = 0xAA;
 
 void setup() {
-  servo.attach(9);  // servo on pin 9
-  servo.write(90);
-  lastTime = millis();
+  Serial.begin(115200);
+  servo1.attach(pin_blue);
+  servo2.attach(pin_orange);
+  servo3.attach(pin_green);
+
+  servo1.write(currentPos[0]);
+  servo2.write(currentPos[1]);
+  servo3.write(currentPos[2]);
 }
 
 void loop() {
+  handleIncoming();
+  updateMotion();
+  sendFeedback();
+}
+
+// ------ READ SERIAL INPUT ------
+void handleIncoming() {
+  static byte buf[7];
+  static byte idx = 0;
+
+  while (Serial.available()) {
+    byte b = Serial.read();
+
+    if (idx == 0 && b != START_BYTE) continue;
+
+    buf[idx++] = b;
+
+    if (idx == 7) {
+      byte a1 = buf[1];
+      byte a2 = buf[2];
+      byte a3 = buf[3];
+      byte tL = buf[4];
+      byte tH = buf[5];
+
+      byte cs = buf[6];
+      if ((a1 ^ a2 ^ a3 ^ tL ^ tH) == cs) {
+
+        // Update targets
+        targetPos[0] = constrain(a1, MIN_POS, MAX_POS);
+        targetPos[1] = constrain(a2, MIN_POS, MAX_POS);
+        targetPos[2] = constrain(a3, MIN_POS, MAX_POS);
+
+        // Store starting positions for interpolation
+        for (int i=0; i<3; i++) startPos[i] = currentPos[i];
+
+        // Extract duration (uint16, little-endian)
+        moveDuration = ((uint16_t)tH << 8) | tL;
+        moveDuration = max(moveDuration, (uint16_t)20); // avoid divide-by-zero
+
+        moveStart = millis();
+      }
+      idx = 0;
+    }
+  }
+}
+
+// ------ INTERPOLATED MOTION ------
+void updateMotion() {
   unsigned long now = millis();
-  float T = (now - lastTime) / 1000.0;
-  lastTime = now;
+  if (now - lastUpdate < UPDATE_INTERVAL) return;
+  lastUpdate = now;
 
-  // Example pattern: move between 45° and 135° every 3 seconds
-  float time = millis() / 1000.0;
-  targetAngle = 90 + 45 * sin(time * 2 * 3.14159 / 3.0);
+  float ratio = float(now - moveStart) / moveDuration;
+  if (ratio > 1.0) ratio = 1.0;
 
-  float smoothAngle = motion.update(T, targetAngle);
-  servo.write(smoothAngle);
+  for (int i=0; i<3; i++) {
+    float desired = startPos[i] + ratio * (targetPos[i] - startPos[i]);
 
-  delay(15);
+    // Rate-limiting safety
+    float diff = desired - currentPos[i];
+    if (abs(diff) > MAX_STEP)
+      currentPos[i] += (diff > 0 ? MAX_STEP : -MAX_STEP);
+    else
+      currentPos[i] = desired;
+
+    // Send to servo
+    servo1.write(currentPos[0]);
+    servo2.write(currentPos[1]);
+    servo3.write(currentPos[2]);
+  }
+}
+
+// ------ FEEDBACK PACKET ------
+void sendFeedback() {
+  static unsigned long lastSend = 0;
+  if (millis() - lastSend < 100) return;
+  lastSend = millis();
+
+  byte c1 = (byte)currentPos[0];
+  byte c2 = (byte)currentPos[1];
+  byte c3 = (byte)currentPos[2];
+  byte checksum = c1 ^ c2 ^ c3;
+
+  Serial.write(0xAB);
+  Serial.write(c1);
+  Serial.write(c2);
+  Serial.write(c3);
+  Serial.write(checksum);
 }
