@@ -1,0 +1,27 @@
+def read_feedback(ser):
+    """Non-blocking state machine reader."""
+    static = read_feedback.__dict__
+
+    if "state" not in static:
+        static["state"] = 0
+        static["buf"] = []
+
+    while ser.in_waiting:
+        b = ord(ser.read(1))
+
+        if static["state"] == 0:          # waiting for start byte
+            if b == 0xAB:
+                static["buf"] = []
+                static["state"] = 1
+
+        elif static["state"] == 1:        # collecting payload
+            static["buf"].append(b)
+            if len(static["buf"]) == 4:
+                c1, c2, c3, cs = static["buf"]
+                static["state"] = 0
+                if (c1 ^ c2 ^ c3) == cs:
+                    return (c1, c2, c3)
+                else:
+                    return None
+
+    return None
