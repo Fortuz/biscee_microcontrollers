@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+import rospy
+import serial
+import struct
+
+START_BYTE = 0xAA
+FEEDBACK_START = 0xAB
+
+def build_packet(a1, a2, a3, duration_ms):
+    # Constrain
+    a1 = max(20, min(150, a1))
+    a2 = max(20, min(150, a2))
+    a3 = max(20, min(150, a3))
+
+    # Duration split into low/high bytes
+    tL = duration_ms & 0xFF
+    tH = (duration_ms >> 8) & 0xFF
+
+    checksum = a1 ^ a2 ^ a3 ^ tL ^ tH
+
+    return bytes([START_BYTE, a1, a2, a3, tL, tH, checksum])
+
+
+def read_feedback(ser):
+    """ Returns (c1, c2, c3) or None """
+    if ser.in_waiting < 5:
+        return None
+
+    b = ser.read()
+
+    if b[0] != FEEDBACK_START:
+        return None
+
+    data = ser.read(4)
+    if len(data) != 4:
+        return None
+
+    c1, c2, c3, cs = data
+    if (c1 ^ c2 ^ c3) != cs:
+        return None
+
+    return (c1, c2, c3)
+
+
+def main():
+    rospy.init_node("arduino_commander")
+
+    port = rospy.get_param("~port", "/dev/ttyUSB0")
+    baud = rospy.get_param("~baud", 115200)
+
+    rospy.loginfo("Opening serial port %s at %d..." % (port, baud))
+    ser = serial.Serial(port, baud, timeout=0.01)
+
+    rate = rospy.Rate(20)
+
+    while not rospy.is_shutdown():
+        try:
+            # ---- USER INPUT ----
+            print("\nEnter 3 angles (20–150) separated by spaces:")
+            user_input = raw_input("> ")
+
+            parts = user_input.split()
+            if len(parts) != 3:
+                print("Please enter exactly 3 numbers.")
+                continue
+
+            a1, a2, a3 = map(int, parts)
+            duration = 1000  # ms fixed, can also ask user
+
+            packet = build_packet(a1, a2, a3, duration)
+            ser.write(packet)
+
+            print("Sent command: %d %d %d (duration %d ms)" %
+                  (a1, a2, a3, duration))
+
+            # ---- WAIT FOR FEEDBACK ----
+            rospy.sleep(0.1)
+            feedback = read_feedback(ser)
+            if feedback:
+                c1, c2, c3 = feedback
+                print("Arduino feedback: [%d, %d, %d]" % (c1, c2, c3))
+            else:
+                print("No valid feedback received.")
+
+        except KeyboardInterrupt:
+            break
+
+        rate.sleep()
+
+    ser.close()
+
+
+if __name__ == "__main__":
+    main()
